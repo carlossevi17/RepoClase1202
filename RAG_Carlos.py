@@ -8,90 +8,71 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 import os
 
-# Configuración de la interfaz con estilo matemático
-st.set_page_config(page_title="Math Solver RAG", page_icon="🧮")
-st.title("🧮 Solucionador de Sistemas de Ecuaciones")
-st.markdown("Sube un PDF con sistemas de ecuaciones y yo los resolveré por ti.")
+st.set_page_config(page_title="Math RAG Pro", page_icon="📐", layout="wide")
+st.title("📐 Solucionador Avanzado de Sistemas Lineales")
 
-# Barra lateral para credenciales y configuración
 with st.sidebar:
-    st.header("🔑 Credenciales")
+    st.header("🔑 Seguridad")
     groq_key = st.text_input("Groq API Key:", type="password")
     hf_token = st.text_input("Hugging Face Token:", type="password")
-    
     st.divider()
-    st.header("⚙️ Configuración")
-    modelo = st.selectbox("Modelo LLM", ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"])
-    archivo = st.file_uploader("Sube el PDF de matemáticas", type="pdf")
+    archivo = st.file_uploader("Sube el PDF con ecuaciones", type="pdf")
 
-# Validación de credenciales antes de procesar
 if archivo and groq_key and hf_token:
-    # Configurar el token en el entorno
     os.environ["HUGGINGFACEHUB_API_TOKEN"] = hf_token
-
-    with open("temp_math.pdf", "wb") as f:
+    
+    with open("temp.pdf", "wb") as f:
         f.write(archivo.getbuffer())
 
     @st.cache_resource
-    def procesar_pdf_matematico(ruta, _token):
+    def procesar_pdf_mejorado(ruta):
         loader = PyMuPDFLoader(ruta)
         docs = loader.load()
-        # Chunks más pequeños para no perder detalles de las ecuaciones
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
+        
+        # Reducimos el overlap y ajustamos el tamaño para no romper ecuaciones
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000, 
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ".", " "]
+        )
         chunks = text_splitter.split_documents(docs)
         
-        # Inicializar embeddings usando el token proporcionado
-        embeddings = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-small-en-v1.5",
-            model_kwargs={'device': 'cpu'},
-            encode_kwargs={'normalize_embeddings': True}
-        )
+        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
         vectorstore = FAISS.from_documents(chunks, embeddings)
-        return vectorstore.as_retriever(search_kwargs={"k": 4})
+        # Aumentamos k a 6 para captar mejor el entorno de la ecuación
+        return vectorstore.as_retriever(search_kwargs={"k": 6})
 
-    try:
-        retriever = procesar_pdf_matematico("temp_math.pdf", hf_token)
-        st.success("✅ PDF matemático procesado. ¡Listo para resolver!")
-    except Exception as e:
-        st.error(f"Error al procesar: {e}")
-
-    # Historial de Chat
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    for msg in st.session_state.messages:
-        st.chat_message(msg["role"]).write(msg["content"])
-
-    if pregunta := st.chat_input("Ej: Resuelve el sistema de ecuaciones de la página 2"):
-        st.session_state.messages.append({"role": "user", "content": pregunta})
+    retriever = procesar_pdf_mejorado("temp.pdf")
+    
+    if pregunta := st.chat_input("Escribe el sistema o la página donde está..."):
         st.chat_message("user").write(pregunta)
-
-        # RAG: Recuperación de contexto
-        contexto_docs = retriever.invoke(pregunta)
-        contexto_texto = "\n\n".join([doc.page_content for doc in contexto_docs])
         
-        # Prompt especializado en Matemáticas
+        # Recuperación
+        docs = retriever.invoke(pregunta)
+        contexto_sucio = "\n---\n".join([d.page_content for d in docs])
+
+        # Prompt ultra-específico para "leer" matemáticas mal formateadas
         template = ChatPromptTemplate.from_messages([
-            ("system", """Eres un experto en álgebra lineal. Tu tarea es identificar y resolver sistemas de ecuaciones lineales extraídos del contexto proporcionado.
+            ("system", """Eres un experto en álgebra lineal capaz de leer texto extraído de PDFs que puede estar mal formateado.
             
-            REGLAS:
-            1. Muestra el sistema de ecuaciones claramente.
-            2. Resuelve paso a paso (puedes usar sustitución, igualación o reducción).
-            3. Si el sistema no tiene solución o tiene infinitas, explícalo.
-            4. Si no encuentras ecuaciones en el contexto, dilo amablemente.
+            TAREA:
+            1. Analiza el contexto y busca patrones numéricos que parezcan sistemas de ecuaciones (ej. variables x, y, z o coeficientes alineados).
+            2. Reconstruye las ecuaciones correctamente.
+            3. Resuelve el sistema paso a paso usando el método de Gauss o sustitución.
+            4. Si los datos están incompletos debido al formato del PDF, indica qué parte falta.
             
-            Contexto:
+            CONTEXTO DEL PDF:
             {context}"""),
             ("human", "{input}")
         ])
-        
-        llm = ChatGroq(groq_api_key=groq_key, model=modelo, temperature=0.1)
+
+        llm = ChatGroq(groq_api_key=groq_key, model="llama-3.3-70b-versatile", temperature=0)
         chain = template | llm | StrOutputParser()
         
-        with st.spinner("Calculando solución..."):
-            respuesta = chain.invoke({"context": contexto_texto, "input": pregunta})
-        
-        st.session_state.messages.append({"role": "assistant", "content": respuesta})
-        st.chat_message("assistant").write(respuesta)
+        with st.chat_message("assistant"):
+            response = chain.invoke({"context": contexto_sucio, "input": pregunta})
+            st.markdown(response)
+            with st.expander("Ver texto extraído (Contexto Real)"):
+                st.text(contexto_sucio)
 else:
-    st.info("Configura las API Keys y sube el PDF matemático en la barra lateral para empezar.")
+    st.info("Introduce las llaves y el PDF para empezar.")
