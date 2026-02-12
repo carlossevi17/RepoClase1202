@@ -1,109 +1,71 @@
 import streamlit as st
-import os
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.document_loaders import PyMuPDFLoader
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+import os
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="SafeBank AI Support", page_icon="🏦", layout="wide")
+# Configuración de la interfaz
+st.set_page_config(page_title="SafeBank AI Reader", page_icon="📖")
+st.title("📖 Analizador de Manuales SafeBank")
 
-# Estilo personalizado para un toque original
-st.markdown("""
-    <style>
-    .main { background-color: #f5f7f9; }
-    .stChatFloatingInputContainer { background-color: #ffffff; }
-    .sidebar .sidebar-content { background-image: linear-gradient(#2e7d32, #1b5e20); color: white; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- SIDEBAR: Configuración y Carga ---
+# Barra lateral para configuración
 with st.sidebar:
-    st.title("🏦 SafeBank AI Config")
+    st.header("Configuración")
     api_key = st.text_input("Introduce tu Groq API Key:", type="password")
-    
-    st.divider()
-    model_id = st.selectbox("Modelo", ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"])
-    temp = st.slider("Creatividad (Temperature)", 0.0, 1.0, 0.3)
-    
-    uploaded_file = st.file_uploader("Sube el manual de SafeBank (PDF)", type="pdf")
-    
-    if st.button("🚀 Inicializar Conocimiento"):
-        if not api_key or not uploaded_file:
-            st.error("Por favor, introduce la API Key y sube el PDF.")
-        else:
-            with st.spinner("Procesando manual..."):
-                # Guardar temporalmente
-                with open("temp.pdf", "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                
-                # 1. Cargar y Dividir
-                loader = PyMuPDFLoader("temp.pdf")
-                docs = loader.load()
-                splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-                chunks = splitter.split_documents(docs)
-                
-                # 2. Embeddings y Vector Store
-                embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-large-en-v1.5")
-                vectorstore = FAISS.from_documents(chunks, embeddings)
-                
-                # Guardar en sesión
-                st.session_state.retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-                st.session_state.ready = True
-                st.success("¡Base de datos lista!")
+    modelo = st.selectbox("Modelo", ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"])
+    archivo = st.file_uploader("Sube el PDF del manual", type="pdf")
 
-# --- LÓGICA RAG ---
-def get_rag_chain():
-    llm = ChatGroq(groq_api_key=api_key, model=model_id, temperature=temp)
-    
-    system_prompt = (
-        "Eres el asistente oficial de SafeBank. Usa el contexto para responder "
-        "de forma profesional y amable. Si no sabes la respuesta, sugiere contactar "
-        "al soporte humano en support@safebank.com.\n\nContexto: {context}"
-    )
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
-    
-    question_answer_chain = create_stuff_documents_chain(llm, prompt)
-    return create_retrieval_chain(st.session_state.retriever, question_answer_chain)
+# Inicialización del sistema RAG
+if archivo and api_key:
+    # Guardar el PDF temporalmente para que el Loader pueda leerlo
+    with open("temp_manual.pdf", "wb") as f:
+        f.write(archivo.getbuffer())
 
-# --- INTERFAZ DE CHAT ---
-st.title("💬 SafeBank Support Center")
-st.caption("Asistente inteligente entrenado con el manual operativo v2026")
+    # Procesamiento del documento
+    @st.cache_resource # Esto evita que se procese el PDF cada vez que haces una pregunta
+    def procesar_pdf(ruta):
+        loader = PyMuPDFLoader(ruta)
+        docs = loader.load()
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=100)
+        chunks = text_splitter.split_documents(docs)
+        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+        vectorstore = FAISS.from_documents(chunks, embeddings)
+        return vectorstore.as_retriever(search_kwargs={"k": 3})
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    retriever = procesar_pdf("temp_manual.pdf")
+    st.success("✅ Manual analizado y listo para preguntas.")
 
-# Mostrar historial
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+    # Interfaz de Chat
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-# Entrada de usuario
-if prompt := st.chat_input("¿En qué puedo ayudarte hoy?"):
-    if "ready" not in st.session_state:
-        st.error("Primero inicializa el conocimiento en la barra lateral.")
-    else:
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    for msg in st.session_state.messages:
+        st.chat_message(msg["role"]).write(msg["content"])
 
-        with st.chat_message("assistant"):
-            rag_chain = get_rag_chain()
-            response = rag_chain.invoke({"input": prompt})
-            full_response = response["answer"]
-            st.markdown(full_response)
-            
-            # Botón expandible para ver las fuentes (toque profesional)
-            with st.expander("Ver fuentes consultadas"):
-                for doc in response["context"]:
-                    st.write(f"- {doc.page_content[:200]}...")
+    if pregunta := st.chat_input("¿Qué quieres saber del manual?"):
+        st.session_state.messages.append({"role": "user", "content": pregunta})
+        st.chat_message("user").write(pregunta)
 
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
+        # Búsqueda y Generación
+        contexto_docs = retriever.invoke(pregunta)
+        contexto_texto = "\n\n".join([doc.page_content for doc in contexto_docs])
+        
+        # Prompt directo (más estable que las cadenas pre-hechas)
+        template = ChatPromptTemplate.from_messages([
+            ("system", "Responde basándote solo en este contexto:\n\n{context}"),
+            ("human", "{input}")
+        ])
+        
+        llm = ChatGroq(groq_api_key=api_key, model=modelo, temperature=0.3)
+        chain = template | llm | StrOutputParser()
+        
+        respuesta = chain.invoke({"context": contexto_texto, "input": pregunta})
+        
+        st.session_state.messages.append({"role": "assistant", "content": respuesta})
+        st.chat_message("assistant").write(respuesta)
+else:
+    st.info("Por favor, introduce tu API Key y sube un archivo PDF para comenzar.")
